@@ -126,3 +126,65 @@ fn main() {
     console_error_panic_hook::set_once();
     leptos::mount::mount_to_body(App);
 }
+
+#[cfg(test)]
+mod tests {
+    use lopdf::{dictionary, Document, Object, Stream};
+
+    fn make_pdf_with_rect() -> Vec<u8> {
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "MediaBox" => vec![0.into(), 0.into(), 200.into(), 200.into()],
+        });
+        // fill a 100x100 black rect
+        let content_id = doc.add_object(Stream::new(
+            dictionary! {},
+            b"0 0 0 rg 50 50 100 100 re f".to_vec(),
+        ));
+        doc.get_dictionary_mut(page_id)
+            .unwrap()
+            .set("Contents", content_id);
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", catalog_id);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn hayro_renders_vector_content() {
+        use hayro::hayro_interpret::InterpreterSettings;
+        use hayro::hayro_syntax::Pdf;
+        use hayro::{RenderCache, RenderSettings};
+
+        let bytes = make_pdf_with_rect();
+        let pdf = Pdf::new(bytes).unwrap();
+        let page = pdf.pages().get(0).unwrap();
+        let pixmap = hayro::render(
+            page,
+            &RenderCache::new(),
+            &InterpreterSettings::default(),
+            &RenderSettings::default(),
+        );
+        assert_eq!(pixmap.width(), 200);
+        assert_eq!(pixmap.height(), 200);
+        let data = pixmap.data_as_u8_slice();
+        let has_dark = data.chunks_exact(4).any(|px| px[0] < 128);
+        assert!(has_dark, "expected the black rect to be rasterized");
+    }
+}
+

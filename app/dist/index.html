@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>pdf-edit</title>
+    
+<script type="module">
+import init, * as bindings from 'pdf-edit/pdf-edit-app-325cff3699df6a90.js';
+const wasm = await init({ module_or_path: 'pdf-edit/pdf-edit-app-325cff3699df6a90_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+  <link rel="modulepreload" href="pdf-edit/pdf-edit-app-325cff3699df6a90.js" crossorigin="anonymous" integrity="sha384-qFM2CeCiWj5VinPcasYTP4s4ImcvkT/zhe7jo4mYejTkCES7CZcvpuMB8x1HNC1x"><link rel="preload" href="pdf-edit/pdf-edit-app-325cff3699df6a90_bg.wasm" crossorigin="anonymous" integrity="sha384-XCESGC2Z6s/0+0EFuvH4Zw+CENwLi58YB5nMHt25dnDbfiVt8YDYnB8eMa4YehhF" as="fetch" type="application/wasm"></head>
+  <body></body>
+</html>
