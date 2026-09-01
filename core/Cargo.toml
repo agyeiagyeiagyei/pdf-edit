@@ -1,0 +1,9 @@
+[package]
+name = "pdf-edit-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core PDF manipulation library for pdf-edit"
+license = "Apache-2.0"
+
+[dependencies]
+lopdf = "0.44.0"
