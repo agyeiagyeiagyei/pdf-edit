@@ -16,8 +16,15 @@ fn render_page_to_canvas(
         .pages()
         .get(page_index)
         .ok_or_else(|| format!("no page {page_index}"))?;
+    // render at device pixel ratio (capped) so the bitmap isn't upscaled on HiDPI screens
+    let scale = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .unwrap_or(1.0)
+        .clamp(1.0, 3.0) as f32;
     let mut render_settings = RenderSettings::default();
     render_settings.bg_color = hayro::vello_cpu::color::palette::css::WHITE;
+    render_settings.x_scale = scale;
+    render_settings.y_scale = scale;
     let pixmap = hayro::render(
         page,
         &RenderCache::new(),
@@ -27,6 +34,13 @@ fn render_page_to_canvas(
 
     canvas.set_width(pixmap.width() as u32);
     canvas.set_height(pixmap.height() as u32);
+    let el: &web_sys::HtmlElement = canvas.unchecked_ref();
+    el.style()
+        .set_property("width", &format!("{}px", pixmap.width() as f32 / scale))
+        .ok();
+    el.style()
+        .set_property("height", &format!("{}px", pixmap.height() as f32 / scale))
+        .ok();
     let ctx = canvas
         .get_context("2d")
         .map_err(|e| format!("ctx: {e:?}"))?
