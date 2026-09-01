@@ -35,7 +35,7 @@ jobs:
           curl -sL "https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz" | tar xz
           sudo install -m 755 trunk /usr/local/bin/trunk
       - name: Build
-        run: cd app && trunk build --release --public-url pdf-edit
+        run: cd app && trunk build --release --public-url /pdf-edit/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: app/dist
