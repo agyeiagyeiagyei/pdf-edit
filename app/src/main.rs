@@ -2,12 +2,26 @@ use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
-fn render_page_to_canvas(
+const THUMB_WIDTH_PX: f32 = 160.0;
+
+fn unpremultiply(data: &[u8]) -> Vec<u8> {
+    let mut rgba = data.to_vec();
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a > 0 && a < 255 {
+            px[0] = ((px[0] as u32 * 255) / a).min(255) as u8;
+            px[1] = ((px[1] as u32 * 255) / a).min(255) as u8;
+            px[2] = ((px[2] as u32 * 255) / a).min(255) as u8;
+        }
+    }
+    rgba
+}
+
+fn render_pixmap(
     pdf_bytes: &[u8],
     page_index: usize,
-    zoom: f32,
-    canvas: &web_sys::HtmlCanvasElement,
-) -> Result<(), String> {
+    scale: f32,
+) -> Result<hayro::vello_cpu::Pixmap, String> {
     use hayro::hayro_interpret::InterpreterSettings;
     use hayro::hayro_syntax::Pdf;
     use hayro::{RenderCache, RenderSettings};
@@ -17,25 +31,54 @@ fn render_page_to_canvas(
         .pages()
         .get(page_index)
         .ok_or_else(|| format!("no page {page_index}"))?;
-    // render at zoom × device pixel ratio (capped) so the bitmap is 1:1 with physical pixels
+    let mut settings = RenderSettings::default();
+    settings.bg_color = hayro::vello_cpu::color::palette::css::WHITE;
+    settings.x_scale = scale;
+    settings.y_scale = scale;
+    Ok(hayro::render(
+        page,
+        &RenderCache::new(),
+        &InterpreterSettings::default(),
+        &settings,
+    ))
+}
+
+fn paint_pixmap(
+    pixmap: &hayro::vello_cpu::Pixmap,
+    canvas: &web_sys::HtmlCanvasElement,
+) -> Result<(), String> {
+    canvas.set_width(pixmap.width() as u32);
+    canvas.set_height(pixmap.height() as u32);
+    let ctx = canvas
+        .get_context("2d")
+        .map_err(|e| format!("ctx: {e:?}"))?
+        .ok_or("no 2d context")?
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .map_err(|e| format!("ctx cast: {e:?}"))?;
+    let rgba = unpremultiply(pixmap.data_as_u8_slice());
+    let img = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+        wasm_bindgen::Clamped(&rgba[..]),
+        pixmap.width() as u32,
+        pixmap.height() as u32,
+    )
+    .map_err(|e| format!("imagedata: {e:?}"))?;
+    ctx.put_image_data(&img, 0.0, 0.0)
+        .map_err(|e| format!("put_image_data: {e:?}"))
+}
+
+fn render_page_to_canvas(
+    pdf_bytes: &[u8],
+    page_index: usize,
+    zoom: f32,
+    canvas: &web_sys::HtmlCanvasElement,
+) -> Result<(), String> {
     let dpr = web_sys::window()
         .map(|w| w.device_pixel_ratio())
         .unwrap_or(1.0)
         .clamp(1.0, 3.0);
     let scale = (zoom.max(0.05) as f64 * dpr) as f32;
-    let mut render_settings = RenderSettings::default();
-    render_settings.bg_color = hayro::vello_cpu::color::palette::css::WHITE;
-    render_settings.x_scale = scale;
-    render_settings.y_scale = scale;
-    let pixmap = hayro::render(
-        page,
-        &RenderCache::new(),
-        &InterpreterSettings::default(),
-        &render_settings,
-    );
-
-    canvas.set_width(pixmap.width() as u32);
-    canvas.set_height(pixmap.height() as u32);
+    let pixmap = render_pixmap(pdf_bytes, page_index, scale)?;
+    paint_pixmap(&pixmap, canvas)?;
     let el: &web_sys::HtmlElement = canvas.unchecked_ref();
     el.style()
         .set_property("width", &format!("{}px", pixmap.width() as f32 / dpr as f32))
@@ -43,32 +86,30 @@ fn render_page_to_canvas(
     el.style()
         .set_property("height", &format!("{}px", pixmap.height() as f32 / dpr as f32))
         .ok();
-    let ctx = canvas
-        .get_context("2d")
-        .map_err(|e| format!("ctx: {e:?}"))?
-        .ok_or("no 2d context")?
-        .dyn_into::<web_sys::CanvasRenderingContext2d>()
-        .map_err(|e| format!("ctx cast: {e:?}"))?;
+    Ok(())
+}
 
-    let mut rgba = pixmap.data_as_u8_slice().to_vec();
-    // pixmap is premultiplied; canvas ImageData wants straight alpha
-    for px in rgba.chunks_exact_mut(4) {
-        let a = px[3] as u32;
-        if a > 0 && a < 255 {
-            px[0] = ((px[0] as u32 * 255) / a).min(255) as u8;
-            px[1] = ((px[1] as u32 * 255) / a).min(255) as u8;
-            px[2] = ((px[2] as u32 * 255) / a).min(255) as u8;
-        }
-    }
-    let clamped = wasm_bindgen::Clamped(&rgba[..]);
-    let img = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
-        clamped,
-        pixmap.width() as u32,
-        pixmap.height() as u32,
-    )
-    .map_err(|e| format!("imagedata: {e:?}"))?;
-    ctx.put_image_data(&img, 0.0, 0.0)
-        .map_err(|e| format!("put_image_data: {e:?}"))
+fn render_thumbnail(pdf_bytes: &[u8], page_index: usize) -> Result<String, String> {
+    use hayro::hayro_syntax::Pdf;
+    let pdf = Pdf::new(pdf_bytes.to_vec()).map_err(|e| format!("parse: {e:?}"))?;
+    let page = pdf
+        .pages()
+        .get(page_index)
+        .ok_or_else(|| format!("no page {page_index}"))?;
+    let (w, _) = page.render_dimensions();
+    let scale = if w > 0.0 { THUMB_WIDTH_PX / w } else { 0.25 };
+    drop(pdf);
+    let pixmap = render_pixmap(pdf_bytes, page_index, scale)?;
+
+    let document = web_sys::window()
+        .and_then(|w| w.document())
+        .ok_or("no document")?;
+    let canvas: web_sys::HtmlCanvasElement = document
+        .create_element("canvas")
+        .map_err(|e| format!("{e:?}"))?
+        .unchecked_into();
+    paint_pixmap(&pixmap, &canvas)?;
+    canvas.to_data_url().map_err(|e| format!("{e:?}"))
 }
 
 fn download_bytes(bytes: &[u8], name: &str) {
@@ -101,22 +142,43 @@ fn App() -> impl IntoView {
     let pdf_bytes = RwSignal::new(Vec::<u8>::new());
     let filename = RwSignal::new("edited.pdf".to_string());
     let zoom = RwSignal::new(1.0f32);
+    let thumbs = RwSignal::new(Vec::<String>::new());
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
 
-    let render_current = move || {
-        if let Some(canvas) = canvas_ref.get() {
-            let canvas_el: &web_sys::HtmlCanvasElement = &canvas;
-            match render_page_to_canvas(&pdf_bytes.get(), page.get(), zoom.get(), canvas_el) {
-                Ok(()) => status.set(format!(
-                    "Page {} of {} · {}%",
-                    page.get() + 1,
-                    page_count.get(),
-                    (zoom.get() * 100.0).round()
-                )),
-                Err(e) => status.set(format!("render error: {e}")),
-            }
+    // re-render main canvas whenever document, page, or zoom changes
+    Effect::new(move || {
+        let bytes = pdf_bytes.get();
+        let p = page.get();
+        let z = zoom.get();
+        if bytes.is_empty() {
+            return;
         }
-    };
+        request_animation_frame(move || {
+            if let Some(canvas) = canvas_ref.get() {
+                let canvas_el: &web_sys::HtmlCanvasElement = &canvas;
+                if let Err(e) = render_page_to_canvas(&bytes, p, z, canvas_el) {
+                    status.set(format!("render error: {e}"));
+                }
+            }
+        });
+    });
+
+    // regenerate thumbnails whenever the document changes
+    Effect::new(move || {
+        let bytes = pdf_bytes.get();
+        if bytes.is_empty() {
+            thumbs.set(vec![]);
+            return;
+        }
+        let n = match pdf_edit_core::PdfDoc::load(&bytes) {
+            Ok(d) => d.page_count(),
+            Err(_) => 0,
+        };
+        let urls: Vec<String> = (0..n)
+            .map(|i| render_thumbnail(&bytes, i).unwrap_or_default())
+            .collect();
+        thumbs.set(urls);
+    });
 
     let on_file = move |ev: leptos::ev::Event| {
         let input: web_sys::HtmlInputElement = event_target(&ev);
@@ -135,7 +197,7 @@ fn App() -> impl IntoView {
                             page.set(0);
                             zoom.set(1.0);
                             pdf_bytes.set(bytes);
-                            request_animation_frame(render_current);
+                            status.set("Loaded.".to_string());
                         }
                         Err(e) => status.set(format!("lopdf could not load: {e}")),
                     }
@@ -145,9 +207,34 @@ fn App() -> impl IntoView {
         });
     };
 
+    let apply_edit = move |f: &dyn Fn(&mut pdf_edit_core::PdfDoc)| {
+        let bytes = pdf_bytes.get();
+        if bytes.is_empty() {
+            return;
+        }
+        match pdf_edit_core::PdfDoc::load(&bytes) {
+            Ok(mut doc) => {
+                f(&mut doc);
+                match doc.save() {
+                    Ok(out) => {
+                        let n = doc.page_count();
+                        page_count.set(n);
+                        page.update(|p| {
+                            if *p >= n {
+                                *p = n.saturating_sub(1)
+                            }
+                        });
+                        pdf_bytes.set(out);
+                    }
+                    Err(e) => status.set(format!("save-after-edit failed: {e}")),
+                }
+            }
+            Err(e) => status.set(format!("reload failed: {e}")),
+        }
+    };
+
     let set_zoom = move |f: fn(f32) -> f32| {
         zoom.update(|z| *z = f(*z).clamp(0.25, 5.0));
-        request_animation_frame(render_current);
     };
 
     let on_save = move |_| {
@@ -166,13 +253,13 @@ fn App() -> impl IntoView {
     };
 
     view! {
-        <main style="font-family: system-ui; max-width: 900px; margin: 2rem auto; padding: 0 1rem;">
-            <h1>"pdf-edit"</h1>
-            <p>"Early build — viewer, zoom, save. Files never leave your device."</p>
+        <main style="font-family: system-ui; max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem;">
+            <h1 style="margin-bottom: 0.25rem;">"pdf-edit"</h1>
+            <p style="margin-top: 0; color: #555;">"Files never leave your device."</p>
             <input type="file" accept="application/pdf" on:change=on_file />
             <div style="margin: 0.75rem 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-                <button on:click=move |_| { page.update(|p| *p = p.saturating_sub(1)); request_animation_frame(render_current); }>"← Prev"</button>
-                <button on:click=move |_| { page.update(|p| { if *p + 1 < page_count.get() { *p += 1 } }); request_animation_frame(render_current); }>"Next →"</button>
+                <button on:click=move |_| page.update(|p| *p = p.saturating_sub(1))>"← Prev"</button>
+                <button on:click=move |_| page.update(|p| { if *p + 1 < page_count.get() { *p += 1 } })>"Next →"</button>
                 <span style="border-left: 1px solid #ccc; padding-left: 0.5rem;">
                     <button on:click=move |_| set_zoom(|z| z / 1.25)>"−"</button>
                     <button on:click=move |_| set_zoom(|_| 1.0)>{move || format!("{}%", (zoom.get() * 100.0).round())}</button>
@@ -181,7 +268,37 @@ fn App() -> impl IntoView {
                 <button style="font-weight: 600;" on:click=on_save>"Save PDF"</button>
                 <span>{move || status.get()}</span>
             </div>
-            <canvas node_ref=canvas_ref style="border: 1px solid #ccc; display: block;"></canvas>
+            <div style="display: flex; gap: 1rem; align-items: flex-start;">
+                <div style="width: 190px; flex-shrink: 0; display: flex; flex-direction: column; gap: 0.75rem; max-height: 80vh; overflow-y: auto;">
+                    {move || {
+                        thumbs.get().into_iter().enumerate().map(|(i, url)| {
+                            let num = i + 1;
+                            view! {
+                                <div style=move || format!(
+                                    "border: 2px solid {}; border-radius: 4px; padding: 4px;",
+                                    if page.get() == i { "#2463eb" } else { "#ddd" }
+                                )>
+                                    <img
+                                        src=url
+                                        style="width: 100%; display: block; cursor: pointer;"
+                                        on:click=move |_| page.set(i)
+                                    />
+                                    <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px; margin-top: 2px;">
+                                        <span>{num}</span>
+                                        <span style="display: flex; gap: 2px;">
+                                            <button title="Rotate 90°" on:click=move |_| apply_edit(&|d| { let _ = d.rotate_page_by(num as u32, 90); })>"↻"</button>
+                                            <button title="Move up" on:click=move |_| { if num > 1 { apply_edit(&|d| { let _ = d.move_page(num as u32, num as u32 - 1); }); page.set(i - 1); } }>"↑"</button>
+                                            <button title="Move down" on:click=move |_| { if num < page_count.get() { apply_edit(&|d| { let _ = d.move_page(num as u32, num as u32 + 1); }); page.set(i + 1); } }>"↓"</button>
+                                            <button title="Delete page" on:click=move |_| { if page_count.get() > 1 { apply_edit(&|d| d.delete_page(num as u32)); } }>"✕"</button>
+                                        </span>
+                                    </div>
+                                </div>
+                            }
+                        }).collect_view()
+                    }}
+                </div>
+                <canvas node_ref=canvas_ref style="border: 1px solid #ccc; display: block;"></canvas>
+            </div>
         </main>
     }
 }
@@ -258,4 +375,3 @@ mod tests {
         assert!(has_dark, "expected the black rect to be rasterized");
     }
 }
-
