@@ -5,6 +5,7 @@ use wasm_bindgen_futures::JsFuture;
 fn render_page_to_canvas(
     pdf_bytes: &[u8],
     page_index: usize,
+    zoom: f32,
     canvas: &web_sys::HtmlCanvasElement,
 ) -> Result<(), String> {
     use hayro::hayro_interpret::InterpreterSettings;
@@ -16,11 +17,12 @@ fn render_page_to_canvas(
         .pages()
         .get(page_index)
         .ok_or_else(|| format!("no page {page_index}"))?;
-    // render at device pixel ratio (capped) so the bitmap isn't upscaled on HiDPI screens
-    let scale = web_sys::window()
+    // render at zoom × device pixel ratio (capped) so the bitmap is 1:1 with physical pixels
+    let dpr = web_sys::window()
         .map(|w| w.device_pixel_ratio())
         .unwrap_or(1.0)
-        .clamp(1.0, 3.0) as f32;
+        .clamp(1.0, 3.0);
+    let scale = (zoom.max(0.05) as f64 * dpr) as f32;
     let mut render_settings = RenderSettings::default();
     render_settings.bg_color = hayro::vello_cpu::color::palette::css::WHITE;
     render_settings.x_scale = scale;
@@ -36,10 +38,10 @@ fn render_page_to_canvas(
     canvas.set_height(pixmap.height() as u32);
     let el: &web_sys::HtmlElement = canvas.unchecked_ref();
     el.style()
-        .set_property("width", &format!("{}px", pixmap.width() as f32 / scale))
+        .set_property("width", &format!("{}px", pixmap.width() as f32 / dpr as f32))
         .ok();
     el.style()
-        .set_property("height", &format!("{}px", pixmap.height() as f32 / scale))
+        .set_property("height", &format!("{}px", pixmap.height() as f32 / dpr as f32))
         .ok();
     let ctx = canvas
         .get_context("2d")
@@ -69,19 +71,48 @@ fn render_page_to_canvas(
         .map_err(|e| format!("put_image_data: {e:?}"))
 }
 
+fn download_bytes(bytes: &[u8], name: &str) {
+    let parts = js_sys::Array::new();
+    parts.push(&js_sys::Uint8Array::from(bytes));
+    let mut opts = web_sys::BlobPropertyBag::new();
+    opts.set_type("application/pdf");
+    let Some(window) = web_sys::window() else { return };
+    let Some(document) = window.document() else { return };
+    let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts) else {
+        return;
+    };
+    let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+        return;
+    };
+    if let Ok(a) = document.create_element("a") {
+        let a: web_sys::HtmlAnchorElement = a.unchecked_into();
+        a.set_href(&url);
+        a.set_download(name);
+        a.click();
+    }
+    let _ = web_sys::Url::revoke_object_url(&url);
+}
+
 #[component]
 fn App() -> impl IntoView {
     let status = RwSignal::new("Load a PDF to begin.".to_string());
     let page = RwSignal::new(0usize);
     let page_count = RwSignal::new(0usize);
     let pdf_bytes = RwSignal::new(Vec::<u8>::new());
+    let filename = RwSignal::new("edited.pdf".to_string());
+    let zoom = RwSignal::new(1.0f32);
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
 
     let render_current = move || {
         if let Some(canvas) = canvas_ref.get() {
             let canvas_el: &web_sys::HtmlCanvasElement = &canvas;
-            match render_page_to_canvas(&pdf_bytes.get(), page.get(), canvas_el) {
-                Ok(()) => status.set(format!("Page {} of {}", page.get() + 1, page_count.get())),
+            match render_page_to_canvas(&pdf_bytes.get(), page.get(), zoom.get(), canvas_el) {
+                Ok(()) => status.set(format!(
+                    "Page {} of {} · {}%",
+                    page.get() + 1,
+                    page_count.get(),
+                    (zoom.get() * 100.0).round()
+                )),
                 Err(e) => status.set(format!("render error: {e}")),
             }
         }
@@ -92,6 +123,7 @@ fn App() -> impl IntoView {
         let Some(file) = input.files().and_then(|fl: web_sys::FileList| fl.get(0)) else {
             return;
         };
+        filename.set(file.name());
         status.set("Loading…".to_string());
         leptos::task::spawn_local(async move {
             match JsFuture::from(file.array_buffer()).await {
@@ -101,6 +133,7 @@ fn App() -> impl IntoView {
                         Ok(doc) => {
                             page_count.set(doc.page_count());
                             page.set(0);
+                            zoom.set(1.0);
                             pdf_bytes.set(bytes);
                             request_animation_frame(render_current);
                         }
@@ -112,19 +145,43 @@ fn App() -> impl IntoView {
         });
     };
 
+    let set_zoom = move |f: fn(f32) -> f32| {
+        zoom.update(|z| *z = f(*z).clamp(0.25, 5.0));
+        request_animation_frame(render_current);
+    };
+
+    let on_save = move |_| {
+        if pdf_bytes.get().is_empty() {
+            status.set("Nothing to save yet.".to_string());
+            return;
+        }
+        let result = pdf_edit_core::PdfDoc::load(&pdf_bytes.get()).and_then(|mut d| d.save());
+        match result {
+            Ok(out) => {
+                status.set(format!("Saved {} ({} KB)", filename.get(), out.len() / 1024));
+                download_bytes(&out, &filename.get());
+            }
+            Err(e) => status.set(format!("save error: {e}")),
+        }
+    };
+
     view! {
         <main style="font-family: system-ui; max-width: 900px; margin: 2rem auto; padding: 0 1rem;">
             <h1>"pdf-edit"</h1>
-            <p>"Spike build — viewer only. Files never leave your device."</p>
+            <p>"Early build — viewer, zoom, save. Files never leave your device."</p>
             <input type="file" accept="application/pdf" on:change=on_file />
-            <div style="margin: 0.75rem 0;">
+            <div style="margin: 0.75rem 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
                 <button on:click=move |_| { page.update(|p| *p = p.saturating_sub(1)); request_animation_frame(render_current); }>"← Prev"</button>
-                " "
                 <button on:click=move |_| { page.update(|p| { if *p + 1 < page_count.get() { *p += 1 } }); request_animation_frame(render_current); }>"Next →"</button>
-                " "
+                <span style="border-left: 1px solid #ccc; padding-left: 0.5rem;">
+                    <button on:click=move |_| set_zoom(|z| z / 1.25)>"−"</button>
+                    <button on:click=move |_| set_zoom(|_| 1.0)>{move || format!("{}%", (zoom.get() * 100.0).round())}</button>
+                    <button on:click=move |_| set_zoom(|z| z * 1.25)>"+"</button>
+                </span>
+                <button style="font-weight: 600;" on:click=on_save>"Save PDF"</button>
                 <span>{move || status.get()}</span>
             </div>
-            <canvas node_ref=canvas_ref style="border: 1px solid #ccc; max-width: 100%; display: block;"></canvas>
+            <canvas node_ref=canvas_ref style="border: 1px solid #ccc; display: block;"></canvas>
         </main>
     }
 }
