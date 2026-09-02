@@ -35,6 +35,78 @@ impl PdfDoc {
         self.doc.delete_pages(&[page]);
     }
 
+    /// Append every page of another PDF to the end of this one.
+    /// Inheritable attributes are materialized onto each appended page;
+    /// outlines and form fields from the other document are dropped.
+    pub fn append(&mut self, other_bytes: &[u8]) -> Result<(), lopdf::Error> {
+        const INHERITABLE: [&[u8]; 4] = [b"MediaBox", b"CropBox", b"Rotate", b"Resources"];
+
+        let mut other = lopdf::Document::load_mem(other_bytes)?;
+        other.renumber_objects_with(self.doc.max_id + 1);
+        let other_pages = other.get_pages();
+
+        let catalog = self.doc.catalog()?;
+        let root_pages_id = catalog.get(b"Pages")?.as_reference()?;
+
+        let mut new_kids: Vec<lopdf::ObjectId> = Vec::new();
+        for (_, page_id) in other_pages {
+            let mut dict = other.get_dictionary(page_id)?.clone();
+            let mut current = dict.get(b"Parent").ok().and_then(|o| o.as_reference().ok());
+            while let Some(id) = current {
+                let parent = other.get_dictionary(id)?;
+                for key in INHERITABLE {
+                    if !dict.has(key) {
+                        if let Ok(val) = parent.get(key) {
+                            dict.set(key, val.clone());
+                        }
+                    }
+                }
+                current = parent.get(b"Parent").ok().and_then(|o| o.as_reference().ok());
+            }
+            dict.set("Parent", lopdf::Object::Reference(root_pages_id));
+            new_kids.push(page_id);
+            self.doc.objects.insert(page_id, lopdf::Object::Dictionary(dict));
+        }
+
+        for (id, obj) in other.objects {
+            match obj.type_name().unwrap_or(b"") {
+                b"Page" | b"Pages" | b"Catalog" | b"Outlines" | b"Outline" => {}
+                _ => {
+                    self.doc.objects.insert(id, obj);
+                }
+            }
+        }
+        self.doc.max_id = self
+            .doc
+            .objects
+            .keys()
+            .map(|k| k.0)
+            .max()
+            .unwrap_or(self.doc.max_id);
+
+        let dict = self.doc.get_dictionary_mut(root_pages_id)?;
+        let mut kids = dict.get(b"Kids")?.as_array()?.clone();
+        kids.extend(new_kids.into_iter().map(lopdf::Object::Reference));
+        let count = kids.len() as i64;
+        dict.set("Kids", lopdf::Object::Array(kids));
+        dict.set("Count", lopdf::Object::Integer(count));
+        Ok(())
+    }
+
+    /// Save pages `from..=to` (1-based, inclusive) as a new PDF.
+    pub fn extract(&self, from: u32, to: u32) -> Result<Vec<u8>, lopdf::Error> {
+        let mut doc = self.doc.clone();
+        let n = doc.get_pages().len() as u32;
+        if from < 1 || to < from || to > n {
+            return Err(lopdf::Error::PageNumberNotFound(from.max(to)));
+        }
+        let del: Vec<u32> = (1..=n).filter(|p| *p < from || *p > to).collect();
+        doc.delete_pages(&del);
+        let mut out = Vec::new();
+        doc.save_to(&mut out)?;
+        Ok(out)
+    }
+
     pub fn rotate_page(&mut self, page: u32, degrees: i64) -> Result<(), lopdf::Error> {
         let pages = self.doc.get_pages();
         let Some(&id) = pages.get(&page) else {
@@ -230,8 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn move_page_materializes_inherited_mediabox() {
-        // nested tree: root Pages → [nodeA → [p1], nodeB(mediabox) → [p2]]
+    fn move_page_materializes_inherited_mediabox() {        // nested tree: root Pages → [nodeA → [p1], nodeB(mediabox) → [p2]]
         let mut doc = Document::with_version("1.5");
         let root_id = doc.new_object_id();
         let node_a = doc.new_object_id();
@@ -279,5 +350,29 @@ mod tests {
         let dict = reloaded.get_dictionary(p2).unwrap();
         let mb = dict.get(b"MediaBox").unwrap().as_array().unwrap();
         assert_eq!(mb[2].as_i64().unwrap(), 300);
+    }
+
+    #[test]
+    fn append_merges_pages() {
+        let a = make_three_page_pdf();
+        let b = make_test_pdf();
+        let mut doc = PdfDoc::load(&a).unwrap();
+        doc.append(&b).unwrap();
+        assert_eq!(doc.page_count(), 4);
+        let saved = doc.save().unwrap();
+        let reloaded = PdfDoc::load(&saved).unwrap();
+        assert_eq!(reloaded.page_count(), 4);
+    }
+
+    #[test]
+    fn extract_keeps_range() {
+        let bytes = make_three_page_pdf();
+        let doc = PdfDoc::load(&bytes).unwrap();
+        let out = doc.extract(2, 3).unwrap();
+        let reloaded = PdfDoc::load(&out).unwrap();
+        assert_eq!(reloaded.page_count(), 2);
+        assert!(doc.extract(0, 2).is_err());
+        assert!(doc.extract(2, 9).is_err());
+        assert!(doc.extract(3, 2).is_err());
     }
 }

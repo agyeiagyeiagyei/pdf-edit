@@ -252,6 +252,56 @@ fn App() -> impl IntoView {
         }
     };
 
+    let on_merge = move |ev: leptos::ev::Event| {
+        let input: web_sys::HtmlInputElement = event_target(&ev);
+        let Some(file) = input.files().and_then(|fl: web_sys::FileList| fl.get(0)) else {
+            return;
+        };
+        if pdf_bytes.get().is_empty() {
+            status.set("Load a PDF first, then merge.".to_string());
+            return;
+        }
+        status.set("Merging…".to_string());
+        leptos::task::spawn_local(async move {
+            match JsFuture::from(file.array_buffer()).await {
+                Ok(buf) => {
+                    let other = js_sys::Uint8Array::new(&buf).to_vec();
+                    let merged = pdf_edit_core::PdfDoc::load(&pdf_bytes.get())
+                        .and_then(|mut d| {
+                            d.append(&other)?;
+                            d.save()
+                        });
+                    match merged {
+                        Ok(out) => {
+                            pdf_bytes.set(out);
+                            status.set("Merged.".to_string());
+                        }
+                        Err(e) => status.set(format!("merge failed: {e}")),
+                    }
+                }
+                Err(e) => status.set(format!("read error: {e:?}")),
+            }
+        });
+    };
+
+    let extract_from = RwSignal::new(1u32);
+    let extract_to = RwSignal::new(1u32);
+    let on_extract = move |_| {
+        if pdf_bytes.get().is_empty() {
+            status.set("Load a PDF first.".to_string());
+            return;
+        }
+        let (from, to) = (extract_from.get(), extract_to.get());
+        match pdf_edit_core::PdfDoc::load(&pdf_bytes.get()).and_then(|d| d.extract(from, to)) {
+            Ok(out) => {
+                let name = format!("pages-{}-{}-{}", from, to, filename.get());
+                status.set(format!("Extracted pages {}–{}.", from, to));
+                download_bytes(&out, &name);
+            }
+            Err(e) => status.set(format!("extract failed: {e}")),
+        }
+    };
+
     view! {
         <main style="font-family: system-ui; max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem;">
             <h1 style="margin-bottom: 0.25rem;">"pdf-edit"</h1>
@@ -267,6 +317,21 @@ fn App() -> impl IntoView {
                 </span>
                 <button style="font-weight: 600;" on:click=on_save>"Save PDF"</button>
                 <span>{move || status.get()}</span>
+            </div>
+            <div style="margin: 0.25rem 0 0.75rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; font-size: 14px;">
+                <label style="border: 1px solid #999; border-radius: 4px; padding: 1px 8px; cursor: pointer;">
+                    "Merge PDF…"
+                    <input type="file" accept="application/pdf" style="display: none;" on:change=on_merge />
+                </label>
+                <span style="border-left: 1px solid #ccc; padding-left: 0.5rem; display: flex; gap: 0.35rem; align-items: center;">
+                    "Extract pages"
+                    <input type="number" min="1" style="width: 3.5rem;" prop:value=move || extract_from.get()
+                        on:change=move |ev| { if let Ok(v) = event_target_value(&ev).parse() { extract_from.set(v); } } />
+                    "–"
+                    <input type="number" min="1" style="width: 3.5rem;" prop:value=move || extract_to.get()
+                        on:change=move |ev| { if let Ok(v) = event_target_value(&ev).parse() { extract_to.set(v); } } />
+                    <button on:click=on_extract>"Download"</button>
+                </span>
             </div>
             <div style="display: flex; gap: 1rem; align-items: flex-start;">
                 <div style="width: 190px; flex-shrink: 0; display: flex; flex-direction: column; gap: 0.75rem; max-height: 80vh; overflow-y: auto;">
