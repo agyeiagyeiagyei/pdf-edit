@@ -6,4 +6,7 @@ description = "Core PDF manipulation library for pdf-edit"
 license = "Apache-2.0"
 
 [dependencies]
+hayro = "0.7.1"
+kurbo = "0.13.1"
 lopdf = "0.44.0"
+ttf-parser = "0.25.1"

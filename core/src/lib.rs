@@ -2,6 +2,10 @@
 
 use lopdf::Document;
 
+pub mod annot;
+pub mod replace;
+pub mod text;
+
 pub struct PdfDoc {
     doc: Document,
 }
@@ -152,8 +156,64 @@ impl PdfDoc {
         self.flatten_page_tree(order)
     }
 
-    fn flatten_page_tree(&mut self, order: Vec<lopdf::ObjectId>) -> Result<(), lopdf::Error> {
-        const INHERITABLE: [&[u8]; 4] = [b"MediaBox", b"CropBox", b"Rotate", b"Resources"];
+    pub fn add_markup(
+        &mut self,
+        page: u32,
+        subtype: &str,
+        quads: &[[f32; 4]],
+        color: [f32; 3],
+        contents: &str,
+    ) -> Result<(), lopdf::Error> {
+        annot::add_markup(&mut self.doc, page, subtype, quads, color, contents)
+    }
+
+    pub fn add_ink(
+        &mut self,
+        page: u32,
+        strokes: &[Vec<(f32, f32)>],
+        color: [f32; 3],
+        width: f32,
+    ) -> Result<(), lopdf::Error> {
+        annot::add_ink(&mut self.doc, page, strokes, color, width)
+    }
+
+    pub fn add_note(&mut self, page: u32, x: f32, y: f32, contents: &str) -> Result<(), lopdf::Error> {
+        annot::add_note(&mut self.doc, page, x, y, contents)
+    }
+
+    pub fn annotations(&self, page: u32) -> Vec<annot::AnnotInfo> {
+        annot::list_annotations(&self.doc, page)
+    }
+
+    pub fn delete_annot(&mut self, page: u32, index: usize) -> Result<(), lopdf::Error> {
+        annot::delete_annot(&mut self.doc, page, index)
+    }
+
+    /// Find & replace over search hits. In-place content-stream rewrite where
+    /// the font permits; white-cover overlay with an embedded font otherwise.
+    /// `geometry_bytes` must be the document bytes the hits were extracted
+    /// from (used for overlay page transforms). Returns (in_place, overlay).
+    pub fn find_and_replace(
+        &mut self,
+        geometry_bytes: &[u8],
+        query: &str,
+        hits: &[text::SearchHit],
+        replacement: &str,
+    ) -> Result<(usize, usize), lopdf::Error> {
+        replace::find_and_replace(&mut self.doc, geometry_bytes, query, hits, replacement)
+    }
+
+    /// Overlay-replace specific hits only (white cover + embedded-font text).
+    pub fn overlay_replace(
+        &mut self,
+        geometry_bytes: &[u8],
+        hits: &[text::SearchHit],
+        replacement: &str,
+    ) -> Result<usize, lopdf::Error> {
+        replace::overlay_replace(&mut self.doc, geometry_bytes, hits, replacement)
+    }
+
+    fn flatten_page_tree(&mut self, order: Vec<lopdf::ObjectId>) -> Result<(), lopdf::Error> {        const INHERITABLE: [&[u8]; 4] = [b"MediaBox", b"CropBox", b"Rotate", b"Resources"];
 
         // materialize inheritable attributes onto each page (borrow scope ends before mutation)
         let mut materialized: Vec<(lopdf::ObjectId, Vec<(Vec<u8>, lopdf::Object)>)> = Vec::new();

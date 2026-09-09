@@ -25,6 +25,12 @@ web-sys = { version = "0.3", features = [
   "HtmlAnchorElement",
   "Document",
   "Window",
+  "Element",
+  "HtmlElement",
+  "PointerEvent",
+  "KeyboardEvent",
+  "DomRect",
+  "CssStyleDeclaration",
 ] }
 console_error_panic_hook = "0.1.7"
 getrandom = { version = "0.4", features = ["wasm_js"] }
